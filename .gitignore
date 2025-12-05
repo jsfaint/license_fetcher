@@ -1,2 +1,4 @@
 *.csv
 *.exe
+go-license
+*.xlsx
