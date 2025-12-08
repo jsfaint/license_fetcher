@@ -17,6 +17,129 @@ import (
 	"golang.org/x/mod/modfile"
 )
 
+// createHTTPClient creates a standardized HTTP client with timeout settings
+func createHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:          10,
+			IdleConnTimeout:       30 * time.Second,
+			DisableCompression:    false,
+			DisableKeepAlives:     false,
+			ResponseHeaderTimeout: 5 * time.Second,
+		},
+	}
+}
+
+// cleanVersionString removes comparison operators and cleans up version strings
+func cleanVersionString(version string) string {
+	version = strings.TrimSpace(version)
+	version = strings.TrimPrefix(version, ">=")
+	version = strings.TrimPrefix(version, "==")
+	version = strings.TrimPrefix(version, ">")
+	version = strings.TrimPrefix(version, "<=")
+	version = strings.TrimPrefix(version, "<")
+	version = strings.TrimPrefix(version, "~=")
+	version = strings.TrimPrefix(version, "^")
+	version = strings.TrimPrefix(version, "~")
+	version = strings.Split(version, ",")[0] // Take first part if multiple constraints
+	version = strings.Split(version, " ")[0] // Take first part if space separated
+	return version
+}
+
+// standardizeLicense converts various license formats to standard SPDX identifiers
+func standardizeLicense(licenseName string) string {
+	// Clean up common license abbreviations and variations
+	switch licenseName {
+	case "Apache Software License":
+		return "Apache-2.0"
+	case "BSD License":
+		return "BSD-3-Clause"
+	case "MIT License":
+		return "MIT"
+	case "Mozilla Public License 2.0 (MPL 2.0)":
+		return "MPL-2.0"
+	case "GNU General Public License v3 (GPLv3)":
+		return "GPL-3.0"
+	case "GNU General Public License v2 (GPLv2)":
+		return "GPL-2.0"
+	case "GNU Lesser General Public License v3 (LGPLv3)":
+		return "LGPL-3.0"
+	case "GNU Lesser General Public License v2 (LGPLv2)":
+		return "LGPL-2.0"
+	default:
+		// Try to match common patterns
+		if strings.Contains(licenseName, "Apache") {
+			return "Apache-2.0"
+		} else if strings.Contains(licenseName, "MIT") {
+			return "MIT"
+		} else if strings.Contains(licenseName, "BSD") {
+			return "BSD-3-Clause"
+		} else if strings.Contains(licenseName, "GPL") && strings.Contains(licenseName, "3") {
+			return "GPL-3.0"
+		} else if strings.Contains(licenseName, "GPL") && strings.Contains(licenseName, "2") {
+			return "GPL-2.0"
+		}
+		return licenseName
+	}
+}
+
+// extractGitHubLink extracts GitHub repository link from various sources
+func extractGitHubLink(projectURLs map[string]string, homepage string) (string, string) {
+	var repository, githubURL string
+
+	// Check project URLs for GitHub link
+	for key, url := range projectURLs {
+		if strings.Contains(strings.ToLower(url), "github") {
+			githubURL = url
+		}
+		// Also check for common repository keys
+		if strings.Contains(strings.ToLower(key), "source") ||
+			strings.Contains(strings.ToLower(key), "repository") {
+			repository = url
+		}
+	}
+
+	// Use homepage if no repository found
+	if repository == "" && homepage != "" {
+		repository = homepage
+	}
+
+	// If GitHub URL not found but repository has GitHub, use it
+	if githubURL == "" && strings.Contains(strings.ToLower(repository), "github") {
+		githubURL = repository
+	}
+
+	return repository, githubURL
+}
+
+// setCopyrightFromLicense sets copyright information based on license
+func setCopyrightFromLicense(license string) string {
+	if license != "" {
+		return license + " Copyright"
+	}
+	return ""
+}
+
+// findLatestVersion finds the latest version from releases map
+func findLatestVersion(releases map[string][]struct {
+	PythonVersion string `json:"python_version"`
+	UploadTime    string `json:"upload_time"`
+}) string {
+	latestVersion := ""
+	latestTime := ""
+	for ver, releaseList := range releases {
+		if len(releaseList) > 0 {
+			uploadTime := releaseList[0].UploadTime
+			if uploadTime > latestTime {
+				latestVersion = ver
+				latestTime = uploadTime
+			}
+		}
+	}
+	return latestVersion
+}
+
 type PackageInfo struct {
 	Name            string
 	Version         string
@@ -209,28 +332,10 @@ func getPyPI_Metadata(pkg *Package) PackageInfo {
 	}
 
 	// Clean version string - remove comparison operators
-	version := strings.TrimSpace(pkg.Version)
-	version = strings.TrimPrefix(version, ">=")
-	version = strings.TrimPrefix(version, "==")
-	version = strings.TrimPrefix(version, ">")
-	version = strings.TrimPrefix(version, "<=")
-	version = strings.TrimPrefix(version, "<")
-	version = strings.TrimPrefix(version, "~=")
-	version = strings.TrimPrefix(version, "^")
-	version = strings.Split(version, ",")[0] // Take first part if multiple constraints
-	version = strings.Split(version, " ")[0] // Take first part if space separated
+	version := cleanVersionString(pkg.Version)
 
 	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:          10,
-			IdleConnTimeout:       30 * time.Second,
-			DisableCompression:    false,
-			DisableKeepAlives:     false,
-			ResponseHeaderTimeout: 5 * time.Second,
-		},
-	}
+	client := createHTTPClient()
 
 	// Get info from PyPI API with context
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -278,27 +383,7 @@ func getPyPI_Metadata(pkg *Package) PackageInfo {
 				if len(parts) >= 3 {
 					// Extract the license name (last part)
 					licenseName := parts[len(parts)-1]
-					// Clean up common license abbreviations
-					switch licenseName {
-					case "Apache Software License":
-						info.License = "Apache-2.0"
-					case "BSD License":
-						info.License = "BSD-3-Clause"
-					case "MIT License":
-						info.License = "MIT"
-					case "Mozilla Public License 2.0 (MPL 2.0)":
-						info.License = "MPL-2.0"
-					case "GNU General Public License v3 (GPLv3)":
-						info.License = "GPL-3.0"
-					case "GNU General Public License v2 (GPLv2)":
-						info.License = "GPL-2.0"
-					case "GNU Lesser General Public License v3 (LGPLv3)":
-						info.License = "LGPL-3.0"
-					case "GNU Lesser General Public License v2 (LGPLv2)":
-						info.License = "LGPL-2.0"
-					default:
-						info.License = licenseName
-					}
+					info.License = standardizeLicense(licenseName)
 					info.LicenseURL = "https://licenses.nuget.org/" + info.License
 					break
 				}
@@ -307,21 +392,7 @@ func getPyPI_Metadata(pkg *Package) PackageInfo {
 
 		// If no license found in classifiers, try license field
 		if info.License == "" && pypiPkg.Info.License != "" {
-			licenseText := pypiPkg.Info.License
-			// Clean up license text to get a standard name
-			if strings.Contains(licenseText, "Apache") {
-				info.License = "Apache-2.0"
-			} else if strings.Contains(licenseText, "MIT") {
-				info.License = "MIT"
-			} else if strings.Contains(licenseText, "BSD") {
-				info.License = "BSD-3-Clause"
-			} else if strings.Contains(licenseText, "GPL") && strings.Contains(licenseText, "3") {
-				info.License = "GPL-3.0"
-			} else if strings.Contains(licenseText, "GPL") && strings.Contains(licenseText, "2") {
-				info.License = "GPL-2.0"
-			} else {
-				info.License = licenseText
-			}
+			info.License = standardizeLicense(pypiPkg.Info.License)
 			info.LicenseURL = "https://licenses.nuget.org/" + info.License
 		}
 
@@ -345,38 +416,21 @@ func getPyPI_Metadata(pkg *Package) PackageInfo {
 			info.GitHubURL = pypiPkg.Info.Home_page
 		}
 
-		// Check project URLs for GitHub link
-		for key, url := range pypiPkg.Info.Project_urls {
-			if strings.Contains(strings.ToLower(url), "github") {
-				info.GitHubURL = url
-				break
-			}
-			// Also check for common repository keys
-			if strings.Contains(strings.ToLower(key), "source") ||
-				strings.Contains(strings.ToLower(key), "repository") {
-				info.Repository = url
-			}
+		// Extract GitHub and repository links from project URLs
+		repository, githubURL := extractGitHubLink(pypiPkg.Info.Project_urls, pypiPkg.Info.Home_page)
+		if repository != "" {
+			info.Repository = repository
+		}
+		if githubURL != "" {
+			info.GitHubURL = githubURL
 		}
 
 		// Set copyright if we have license
-		if info.License != "" {
-			info.Copyright = info.License + " Copyright"
-		}
+		info.Copyright = setCopyrightFromLicense(info.License)
 
 		// Try to find the latest version if we don't have a specific one
 		if version == "" && len(pypiPkg.Releases) > 0 {
-			// Find the latest stable version
-			latestVersion := ""
-			latestTime := ""
-			for ver, releases := range pypiPkg.Releases {
-				if len(releases) > 0 {
-					uploadTime := releases[0].UploadTime
-					if uploadTime > latestTime {
-						latestVersion = ver
-						latestTime = uploadTime
-					}
-				}
-			}
+			latestVersion := findLatestVersion(pypiPkg.Releases)
 			if latestVersion != "" {
 				info.Version = latestVersion
 			}
@@ -398,16 +452,7 @@ func getGoModMetadata(pkg *Package) PackageInfo {
 	}
 
 	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:          10,
-			IdleConnTimeout:       30 * time.Second,
-			DisableCompression:    false,
-			DisableKeepAlives:     false,
-			ResponseHeaderTimeout: 5 * time.Second,
-		},
-	}
+	client := createHTTPClient()
 
 	// Get license and other info from pkg.go.dev
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -522,11 +567,11 @@ func getGoModMetadata(pkg *Package) PackageInfo {
 			}
 		}
 
-		// Try to extract copyright info from license or page
-		if info.License != "" {
-			info.Copyright = info.License + " Copyright"
-		} else {
-			// Look for copyright mentions
+		// Set copyright from license
+		info.Copyright = setCopyrightFromLicense(info.License)
+
+		// If no license found, look for copyright mentions
+		if info.License == "" {
 			node = htmlquery.FindOne(doc, `//span[contains(text(), "Copyright")]`)
 			if node == nil {
 				node = htmlquery.FindOne(doc, `//div[contains(text(), "©")]`)
@@ -556,19 +601,10 @@ func getNPMMetadata(pkg *Package) PackageInfo {
 	}
 
 	// Clean version (remove ^, ~, etc.)
-	version := strings.TrimPrefix(strings.TrimPrefix(pkg.Version, "^"), "~")
+	version := cleanVersionString(pkg.Version)
 
 	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			MaxIdleConns:          10,
-			IdleConnTimeout:       30 * time.Second,
-			DisableCompression:    false,
-			DisableKeepAlives:     false,
-			ResponseHeaderTimeout: 5 * time.Second,
-		},
-	}
+	client := createHTTPClient()
 
 	// Get info from npm registry with context
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -638,10 +674,11 @@ func getNPMMetadata(pkg *Package) PackageInfo {
 				info.Repository = npmPkg.Homepage
 			}
 
-			// Try to extract copyright from README or license
-			if info.License != "" {
-				info.Copyright = info.License + " Copyright"
-			} else if npmPkg.Readme != "" {
+			// Set copyright from license
+			info.Copyright = setCopyrightFromLicense(info.License)
+
+			// If no license found, try to extract from README
+			if info.License == "" && npmPkg.Readme != "" {
 				// Try to find copyright mentions in README
 				for line := range strings.SplitSeq(npmPkg.Readme, "\n") {
 					if strings.Contains(strings.ToLower(line), "copyright") ||
