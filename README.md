@@ -1,13 +1,13 @@
 # go-license
 
-A GUI-based license analysis tool for Go and Node.js projects
+A GUI-based license analysis tool for Go, Node.js, and Python projects
 
-一个基于GUI的Go和Node.js项目许可证分析工具
+一个基于GUI的Go、Node.js和Python项目许可证分析工具
 
 ## Features 功能特性
 
-- **Dual Support** 双重支持：支持解析 Go 模块 (go.mod) 和 Node.js 项目 (package.json)
-- **Multi-source Metadata** 多源元数据：从 pkg.go.dev 和 npm registry 获取许可证信息
+- **Multi-language Support** 多语言支持：支持解析 Go 模块 (go.mod)、Node.js 项目 (package.json) 和 Python 项目 (pyproject.toml)
+- **Multi-source Metadata** 多源元数据：从 pkg.go.dev、npm registry 和 PyPI 获取许可证信息
 - **Rich Information** 丰富信息：提取许可证、作者、描述、版权、仓库链接等详细信息
 - **Excel Export** Excel导出：生成格式化的Excel报告，便于查看和管理
 - **GUI Interface** 图形界面：使用文件选择对话框，用户友好
@@ -23,6 +23,7 @@ go run main.go
 2. 选择文件类型：
    - 对于 Go 项目，选择 `go.mod` 文件
    - 对于 Node.js 项目，选择 `package.json` 文件
+   - 对于 Python 项目，选择 `pyproject.toml` 文件
 
 The tool will automatically detect the file type and process accordingly.
 工具会自动检测文件类型并进行相应处理。
@@ -80,12 +81,14 @@ go build -o go-license.exe main.go
 - **[zenity](https://github.com/ncruces/zenity)** - Cross-platform GUI dialogs / 跨平台GUI对话框
 - **[excelize](https://github.com/xuri/excelize/v2)** - Excel file operations / Excel文件操作
 - **[golang.org/x/mod](https://golang.org/x/mod)** - Go module parsing / Go模块解析
+- **[toml](https://github.com/BurntSushi/toml)** - TOML file parsing for Python projects / TOML文件解析（用于Python项目）
 
 ## Technical Details 技术细节
 
 ### Data Sources 数据源
 - **Go modules**: https://pkg.go.dev/
 - **Node.js packages**: https://registry.npmjs.org/
+- **Python packages**: https://pypi.org/
 
 ### Error Handling 错误处理
 - Network requests use context with 10-second timeout

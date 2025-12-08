@@ -3,6 +3,7 @@ module license
 go 1.24.0
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/antchfx/htmlquery v1.3.4
 	github.com/ncruces/zenity v0.10.14
 	github.com/xuri/excelize/v2 v2.10.0

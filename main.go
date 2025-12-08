@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/antchfx/htmlquery"
 	"github.com/ncruces/zenity"
 	"github.com/xuri/excelize/v2"
@@ -33,9 +34,10 @@ type PackageInfo struct {
 
 // Package represents a dependency
 type Package struct {
-	Path    string
-	Version string
-	GoMod   bool
+	Path      string
+	Version   string
+	GoMod     bool
+	PyProject bool
 }
 
 // Parse go.mod file
@@ -101,6 +103,289 @@ func parsePackageJSON(filename string) ([]Package, string, error) {
 	}
 
 	return packages, packageJSON.Name + "-ui", nil
+}
+
+// Parse pyproject.toml file
+func parsePyProjectToml(filename string) ([]Package, string, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var pyProject struct {
+		Project struct {
+			Name         string   `toml:"name"`
+			Dependencies []string `toml:"dependencies"`
+		} `toml:"project"`
+		Tool struct {
+			Poetry struct {
+				Name            string            `toml:"name"`
+				Dependencies    map[string]string `toml:"dependencies"`
+				DevDependencies map[string]string `toml:"dev-dependencies"`
+			} `toml:"poetry"`
+		} `toml:"tool"`
+		BuildSystem struct {
+			Requires []string `toml:"requires"`
+		} `toml:"build-system"`
+	}
+
+	if err := toml.Unmarshal(data, &pyProject); err != nil {
+		return nil, "", err
+	}
+
+	var packages []Package
+
+	// Handle Poetry dependencies
+	if pyProject.Tool.Poetry.Dependencies != nil {
+		for name, version := range pyProject.Tool.Poetry.Dependencies {
+			// Skip poetry itself and special entries
+			if name == "python" || strings.Contains(name, "poetry") {
+				continue
+			}
+			packages = append(packages, Package{
+				Path:      name,
+				Version:   version,
+				GoMod:     false,
+				PyProject: true,
+			})
+		}
+	}
+
+	// Handle Poetry dev-dependencies
+	if pyProject.Tool.Poetry.DevDependencies != nil {
+		for name, version := range pyProject.Tool.Poetry.DevDependencies {
+			// Skip poetry itself and special entries
+			if name == "python" || strings.Contains(name, "poetry") {
+				continue
+			}
+			packages = append(packages, Package{
+				Path:      name,
+				Version:   version,
+				GoMod:     false,
+				PyProject: true,
+			})
+		}
+	}
+
+	// Handle PEP 621 dependencies (project.dependencies)
+	if len(pyProject.Project.Dependencies) > 0 {
+		for _, dep := range pyProject.Project.Dependencies {
+			// Parse dependency string like "requests>=2.0.0" or "numpy==1.19.0"
+			parts := strings.Fields(dep)
+			if len(parts) > 0 {
+				name := parts[0]
+				version := ""
+				if len(parts) > 1 {
+					version = strings.Join(parts[1:], " ")
+				}
+				packages = append(packages, Package{
+					Path:      name,
+					Version:   version,
+					GoMod:     false,
+					PyProject: true,
+				})
+			}
+		}
+	}
+
+	// Determine project name
+	projectName := "python-project"
+	if pyProject.Tool.Poetry.Name != "" {
+		projectName = pyProject.Tool.Poetry.Name
+	} else if pyProject.Project.Name != "" {
+		projectName = pyProject.Project.Name
+	}
+
+	return packages, projectName + "-py", nil
+}
+
+// Get metadata from PyPI
+func getPyPI_Metadata(pkg *Package) PackageInfo {
+	info := PackageInfo{
+		Name:            pkg.Path,
+		Version:         pkg.Version,
+		ModuleNameNoVer: pkg.Path,
+		RepositoryType:  "pypi",
+	}
+
+	// Clean version string - remove comparison operators
+	version := strings.TrimSpace(pkg.Version)
+	version = strings.TrimPrefix(version, ">=")
+	version = strings.TrimPrefix(version, "==")
+	version = strings.TrimPrefix(version, ">")
+	version = strings.TrimPrefix(version, "<=")
+	version = strings.TrimPrefix(version, "<")
+	version = strings.TrimPrefix(version, "~=")
+	version = strings.TrimPrefix(version, "^")
+	version = strings.Split(version, ",")[0] // Take first part if multiple constraints
+	version = strings.Split(version, " ")[0] // Take first part if space separated
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 10 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:          10,
+			IdleConnTimeout:       30 * time.Second,
+			DisableCompression:    false,
+			DisableKeepAlives:     false,
+			ResponseHeaderTimeout: 5 * time.Second,
+		},
+	}
+
+	// Get info from PyPI API with context
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// First try to get package info
+	reqURL := "https://pypi.org/pypi/" + pkg.Path + "/json"
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return info
+	}
+
+	resp, err := client.Do(req)
+	if err != nil || resp.StatusCode != 200 {
+		return info
+	}
+	defer resp.Body.Close()
+
+	var pypiPkg struct {
+		Info struct {
+			Author       string            `json:"author"`
+			AuthorEmail  string            `json:"author_email"`
+			Classifiers  []string          `json:"classifiers"`
+			Description  string            `json:"description"`
+			Summary      string            `json:"summary"`
+			Home_page    string            `json:"home_page"`
+			License      string            `json:"license"`
+			Project_urls map[string]string `json:"project_urls"`
+		} `json:"info"`
+		Releases map[string][]struct {
+			PythonVersion string `json:"python_version"`
+			UploadTime    string `json:"upload_time"`
+		} `json:"releases"`
+		URLs []struct {
+			Packagetype string `json:"packagetype"`
+			URL         string `json:"url"`
+		} `json:"urls"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&pypiPkg); err == nil {
+		// First, look for license in classifiers (more reliable)
+		for _, classifier := range pypiPkg.Info.Classifiers {
+			if strings.HasPrefix(classifier, "License :: ") {
+				parts := strings.Split(classifier, " :: ")
+				if len(parts) >= 3 {
+					// Extract the license name (last part)
+					licenseName := parts[len(parts)-1]
+					// Clean up common license abbreviations
+					switch licenseName {
+					case "Apache Software License":
+						info.License = "Apache-2.0"
+					case "BSD License":
+						info.License = "BSD-3-Clause"
+					case "MIT License":
+						info.License = "MIT"
+					case "Mozilla Public License 2.0 (MPL 2.0)":
+						info.License = "MPL-2.0"
+					case "GNU General Public License v3 (GPLv3)":
+						info.License = "GPL-3.0"
+					case "GNU General Public License v2 (GPLv2)":
+						info.License = "GPL-2.0"
+					case "GNU Lesser General Public License v3 (LGPLv3)":
+						info.License = "LGPL-3.0"
+					case "GNU Lesser General Public License v2 (LGPLv2)":
+						info.License = "LGPL-2.0"
+					default:
+						info.License = licenseName
+					}
+					info.LicenseURL = "https://licenses.nuget.org/" + info.License
+					break
+				}
+			}
+		}
+
+		// If no license found in classifiers, try license field
+		if info.License == "" && pypiPkg.Info.License != "" {
+			licenseText := pypiPkg.Info.License
+			// Clean up license text to get a standard name
+			if strings.Contains(licenseText, "Apache") {
+				info.License = "Apache-2.0"
+			} else if strings.Contains(licenseText, "MIT") {
+				info.License = "MIT"
+			} else if strings.Contains(licenseText, "BSD") {
+				info.License = "BSD-3-Clause"
+			} else if strings.Contains(licenseText, "GPL") && strings.Contains(licenseText, "3") {
+				info.License = "GPL-3.0"
+			} else if strings.Contains(licenseText, "GPL") && strings.Contains(licenseText, "2") {
+				info.License = "GPL-2.0"
+			} else {
+				info.License = licenseText
+			}
+			info.LicenseURL = "https://licenses.nuget.org/" + info.License
+		}
+
+		// Get author
+		if pypiPkg.Info.Author != "" {
+			info.Author = pypiPkg.Info.Author
+		} else if pypiPkg.Info.AuthorEmail != "" {
+			info.Author = pypiPkg.Info.AuthorEmail
+		}
+
+		// Get description
+		if pypiPkg.Info.Summary != "" {
+			info.Description = pypiPkg.Info.Summary
+		} else if pypiPkg.Info.Description != "" {
+			info.Description = pypiPkg.Info.Description
+		}
+
+		// Get repository URL
+		if pypiPkg.Info.Home_page != "" {
+			info.Repository = pypiPkg.Info.Home_page
+			info.GitHubURL = pypiPkg.Info.Home_page
+		}
+
+		// Check project URLs for GitHub link
+		for key, url := range pypiPkg.Info.Project_urls {
+			if strings.Contains(strings.ToLower(url), "github") {
+				info.GitHubURL = url
+				break
+			}
+			// Also check for common repository keys
+			if strings.Contains(strings.ToLower(key), "source") ||
+				strings.Contains(strings.ToLower(key), "repository") {
+				info.Repository = url
+			}
+		}
+
+		// Set copyright if we have license
+		if info.License != "" {
+			info.Copyright = info.License + " Copyright"
+		}
+
+		// Try to find the latest version if we don't have a specific one
+		if version == "" && len(pypiPkg.Releases) > 0 {
+			// Find the latest stable version
+			latestVersion := ""
+			latestTime := ""
+			for ver, releases := range pypiPkg.Releases {
+				if len(releases) > 0 {
+					uploadTime := releases[0].UploadTime
+					if uploadTime > latestTime {
+						latestVersion = ver
+						latestTime = uploadTime
+					}
+				}
+			}
+			if latestVersion != "" {
+				info.Version = latestVersion
+			}
+		} else if version != "" {
+			info.Version = version
+		}
+	}
+
+	return info
 }
 
 // Get metadata from pkg.go.dev
@@ -383,9 +668,20 @@ func main() {
 		zenity.Filename(wd),
 		zenity.FileFilters{
 			{
-				Name:     "Go Module or Package JSON",
-				Patterns: []string{"go.mod", "package.json"},
-				CaseFold: false},
+				Name:     "Go Module",
+				Patterns: []string{"go.mod"},
+				CaseFold: false,
+			},
+			{
+				Name:     "Package JSON",
+				Patterns: []string{"package.json"},
+				CaseFold: false,
+			},
+			{
+				Name:     "Python Project",
+				Patterns: []string{"pyproject.toml"},
+				CaseFold: false,
+			},
 		},
 	)
 	if err != nil {
@@ -394,12 +690,15 @@ func main() {
 	}
 
 	isGoMod := strings.HasSuffix(inName, "go.mod")
+	isPyProject := strings.HasSuffix(inName, "pyproject.toml")
 	var moduleName string
 	var packages []Package
 
 	// Parse file
 	if isGoMod {
 		packages, moduleName, err = parseGoMod(inName)
+	} else if isPyProject {
+		packages, moduleName, err = parsePyProjectToml(inName)
 	} else {
 		packages, moduleName, err = parsePackageJSON(inName)
 	}
@@ -428,6 +727,8 @@ func main() {
 	header := []string{}
 	if isGoMod {
 		header = []string{"Name", "License", "PackageVersion", "LicenseURL", "Author", "Description", "Copyright", "PackageURL", "GitHubURL", "RepositoryType"}
+	} else if isPyProject {
+		header = []string{"Package Name", "License", "Version", "License URL", "Author", "Description", "Copyright", "Repository", "GitHub URL", "Repository Type"}
 	} else {
 		header = []string{"Module Name", "License", "Repository", "License URL", "Author", "Description", "Copyright", "GitHub URL", "Module Name (No Version)", "Version"}
 	}
@@ -455,6 +756,24 @@ func main() {
 				info.Description,
 				info.Copyright,
 				info.PackageURL,
+				info.GitHubURL,
+				info.RepositoryType,
+			}
+			for j, val := range row {
+				cell := fmt.Sprintf("%s%d", string(rune('A'+j)), i+2)
+				f.SetCellValue(sheetName, cell, val)
+			}
+		} else if isPyProject {
+			info = getPyPI_Metadata(&pkg)
+			row := []interface{}{
+				info.Name,
+				info.License,
+				info.Version,
+				info.LicenseURL,
+				info.Author,
+				info.Description,
+				info.Copyright,
+				info.Repository,
 				info.GitHubURL,
 				info.RepositoryType,
 			}
