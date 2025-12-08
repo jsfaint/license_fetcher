@@ -705,6 +705,11 @@ func main() {
 		zenity.Filename(wd),
 		zenity.FileFilters{
 			{
+				Name:     "All Supported Format",
+				Patterns: []string{"go.mod", "package.json", "pyproject.toml"},
+				CaseFold: false,
+			},
+			{
 				Name:     "Go Module",
 				Patterns: []string{"go.mod"},
 				CaseFold: false,
